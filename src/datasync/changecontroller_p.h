@@ -1,114 +1,94 @@
 #ifndef QTDATASYNC_CHANGECONTROLLER_P_H
 #define QTDATASYNC_CHANGECONTROLLER_P_H
 
-#include "qtdatasync_global.h"
-#include "datamerger.h"
-#include "defaults.h"
-#include "stateholder.h"
-#include "synccontroller.h"
-#include "remoteconnector.h"
-
-#include <QtCore/QJsonValue>
 #include <QtCore/QObject>
+#include <QtCore/QMutex>
+#include <QtCore/QUuid>
+
+#include "qtdatasync_global.h"
+#include "objectkey.h"
+#include "controller_p.h"
+#include "localstore_p.h"
 
 namespace QtDataSync {
 
-class Q_DATASYNC_EXPORT ChangeController : public QObject
+class ChangeEmitter;
+
+class Q_DATASYNC_EXPORT ChangeController : public Controller
 {
 	Q_OBJECT
 
 public:
-	enum Operation {
-		Load,
-		Save,
-		Remove,
-		MarkUnchanged
-	};
-	Q_ENUM(Operation)
-
-	enum ActionMode {
-		DoNothing,
-		DownloadRemote,
-		DeleteLocal,
-		UploadLocal,
-		Merge,
-		DeleteRemote,
-		MarkAsUnchanged
-	};
-	Q_ENUM(ActionMode)
-
-	enum ActionState {
-		DoneState,
-		CancelState,
-		DownloadState,
-		SaveState,
-		RemoteMarkState,
-		RemoveLocalState,
-		UploadState,
-		LocalMarkState,
-		LoadState,
-		RemoveRemoteState
-	};
-	Q_ENUM(ActionState)
-
-	struct Q_DATASYNC_EXPORT ChangeOperation {
+	struct Q_DATASYNC_EXPORT ChangeInfo {
 		ObjectKey key;
-		Operation operation;
-		QJsonObject writeObject;
+		quint64 version;
+		QByteArray checksum;
+
+		ChangeInfo();
+		ChangeInfo(const ObjectKey &key, quint64 version, const QByteArray &checksum = {});
 	};
 
-	explicit ChangeController(DataMerger *merger, QObject *parent = nullptr);
+	//not exported, because of "cheating" api. Declared public because of qHash
+	class CachedObjectKey : public ObjectKey {
+	public:
+		CachedObjectKey();
+		CachedObjectKey(const ObjectKey &other, const QUuid &deviceId = {});
+		CachedObjectKey(const QByteArray &hash, const QUuid &deviceId = {});
 
-	void initialize(Defaults *defaults);
-	void finalize();
+		QByteArray hashed() const;
+
+		QUuid optionalDevice;
+
+		bool operator==(const CachedObjectKey &other) const;
+		bool operator!=(const CachedObjectKey &other) const;
+
+	private:
+		mutable QByteArray _hash;
+	};
+
+	explicit ChangeController(const Defaults &defaults, QObject *parent = nullptr);
+
+	void initialize(const QVariantHash &params) final;
 
 public Q_SLOTS:
-	void setInitialLocalStatus(const StateHolder::ChangeHash &changes, bool triggerSync);
-	void updateLocalStatus(const ObjectKey &key, QtDataSync::StateHolder::ChangeState &state);
+	void setUploadingEnabled(bool uploading);
+	void clearUploads();
+	void updateUploadLimit(quint32 limit);
 
-	void setRemoteStatus(RemoteConnector::RemoteState state, const StateHolder::ChangeHash &changes);
-	void updateRemoteStatus(const ObjectKey &key, StateHolder::ChangeState state);
-
-	void nextStage(bool success, const QJsonValue &result = QJsonValue::Undefined);
+	void uploadDone(const QByteArray &key);
+	void deviceUploadDone(const QByteArray &key, const QUuid &deviceId);
 
 Q_SIGNALS:
-	void loadLocalStatus();
-	void updateSyncState(SyncController::SyncState state);
-	void updateSyncProgress(quint32 remainingOperations);
+	void uploadingChanged(bool uploading);
+	void uploadChange(const QByteArray &key, const QByteArray &changeData);
+	void uploadDeviceChange(const QByteArray &key, const QUuid &deviceId, const QByteArray &changeData);
 
-	void beginRemoteOperation(const ChangeOperation &operation);
-	void beginLocalOperation(const ChangeOperation &operation);
+private Q_SLOTS:
+	void changeTriggered();
+	void uploadNext(bool emitStarted = false);
 
 private:
-	Defaults *defaults;
-	DataMerger *merger;
+	//unexported private member
+	struct UploadInfo {
+		ObjectKey key;
+		quint64 version;
+		bool isDelete;
+	};
 
-	bool localReady;
-	bool remoteReady;
-
-	StateHolder::ChangeHash localState;
-	StateHolder::ChangeHash remoteState;
-	QSet<ObjectKey> failedKeys;
-
-	ActionMode currentMode;
-	ObjectKey currentKey;
-	ActionState currentState;
-	QJsonObject currentObject;
-
-	void newChanges();
-	void updateProgress();
-
-	void generateNextAction();
-	void actionDownloadRemote(const QJsonValue &result);
-	void actionDeleteLocal();
-	void actionUploadLocal(const QJsonValue &result);
-	void actionMerge(const QJsonValue &result);
-	void actionDeleteRemote();
-	void actionMarkAsUnchanged();
+	LocalStore *_store;
+	ChangeEmitter *_emitter;
+	bool _uploadingEnabled;
+	int _uploadLimit;
+	QHash<CachedObjectKey, UploadInfo> _activeUploads;
+	quint32 _changeEstimate;
 };
+
+//not exported, just like the class
+uint qHash(const ChangeController::CachedObjectKey &key, uint seed);
 
 }
 
-Q_DECLARE_METATYPE(QtDataSync::ChangeController::ChangeOperation)
+Q_DECLARE_METATYPE(QtDataSync::ChangeController::ChangeInfo)
+Q_DECLARE_TYPEINFO(QtDataSync::ChangeController::ChangeInfo, Q_MOVABLE_TYPE);
 
 #endif // QTDATASYNC_CHANGECONTROLLER_P_H

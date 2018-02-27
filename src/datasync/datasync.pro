@@ -1,62 +1,99 @@
 TARGET = QtDataSync
 
-QT = core jsonserializer sql websockets
-
-include(../3rdparty/vendor/vendor.pri)
+QT = core jsonserializer sql websockets scxml remoteobjects
 
 HEADERS += \
-	asyncdatastore.h \
-	asyncdatastore_p.h \
-	authenticator.h \
-	cachingdatastore.h \
-	datamerger.h \
-	datamerger_p.h \
-	defaults.h \
-	defaults_p.h \
-	localstore.h \
-	remoteconnector.h \
-	setup.h \
-	setup_p.h \
-	stateholder.h \
-	synccontroller.h \
-	synccontroller_p.h \
-	task.h \
-	wsauthenticator.h \
-	wsauthenticator_p.h \
-	changecontroller_p.h \
-	sqllocalstore_p.h \
-	sqlstateholder_p.h \
-	storageengine_p.h \
-	wsremoteconnector_p.h \
-	exceptions.h \
 	qtdatasync_global.h \
-	encryptor.h \
-    qtinyaesencryptor_p.h
+	localstore_p.h \
+	defaults_p.h \
+	defaults.h \
+	logger_p.h \
+	logger.h \
+	setup_p.h \
+	setup.h \
+	exception.h \
+	objectkey.h \
+	datastore.h \
+	datastore_p.h \
+	qtdatasync_helpertypes.h \
+	datatypestore.h \
+	datastoremodel.h \
+	datastoremodel_p.h \
+	exchangeengine_p.h \
+	syncmanager.h \
+	changecontroller_p.h \
+	remoteconnector_p.h \
+	cryptocontroller_p.h \
+	keystore.h \
+	controller_p.h \
+	syncmanager_p.h \
+	synchelper_p.h \
+	synccontroller_p.h \
+	conflictresolver.h \
+	conflictresolver_p.h \
+	accountmanager.h \
+	accountmanager_p.h \
+	userexchangemanager.h \
+	userexchangemanager_p.h \
+	emitteradapter_p.h \
+	changeemitter_p.h \
+	signal_private_connect_p.h \
+    migrationhelper.h \
+    migrationhelper_p.h \
+    remoteconfig.h \
+    remoteconfig_p.h
 
 SOURCES += \
-	asyncdatastore.cpp \
-	authenticator.cpp \
-	cachingdatastore.cpp \
-	changecontroller.cpp \
-	datamerger.cpp \
-	defaults.cpp \
 	localstore.cpp \
-	remoteconnector.cpp \
+	defaults.cpp \
+	logger.cpp \
 	setup.cpp \
-	sqllocalstore.cpp \
-	sqlstateholder.cpp \
-	stateholder.cpp \
-	storageengine.cpp \
+	exception.cpp \
+	qtdatasync_global.cpp \
+	objectkey.cpp \
+	datastore.cpp \
+	datatypestore.cpp \
+	datastoremodel.cpp \
+	exchangeengine.cpp \
+	syncmanager.cpp \
+	changecontroller.cpp \
+	remoteconnector.cpp \
+	cryptocontroller.cpp \
+	keystore.cpp \
+	controller.cpp \
+	synchelper.cpp \
 	synccontroller.cpp \
-	task.cpp \
-	wsauthenticator.cpp \
-	wsremoteconnector.cpp \
-	exceptions.cpp \
-	encryptor.cpp \
-    qtinyaesencryptor.cpp
+	conflictresolver.cpp \
+	syncmanager_p.cpp \
+	accountmanager.cpp \
+	accountmanager_p.cpp \
+	userexchangemanager.cpp \
+	emitteradapter.cpp \
+	changeemitter.cpp \
+    migrationhelper.cpp \
+    remoteconfig.cpp
 
-OTHER_FILES += \
-	engine.qmodel
+STATECHARTS += \
+	connectorstatemachine.scxml
+
+REPC_SOURCE += \
+	syncmanager_p.rep \
+	accountmanager_p.rep \
+	changeemitter_p.rep
+
+REPC_REPLICA += $$REPC_SOURCE
+
+TRANSLATIONS += \
+	translations/qtdatasync_de.ts \
+	translations/qtdatasync_template.ts
+
+DISTFILES += $$TRANSLATIONS
+
+include(rothreadedbackend/rothreadedbackend.pri)
+include(messages/messages.pri)
+include(../3rdparty/cryptopp/cryptopp.pri)
+
+MODULE_PLUGIN_TYPES = keystores
 
 load(qt_module)
 
@@ -67,3 +104,14 @@ win32 {
 } else:mac {
 	QMAKE_TARGET_BUNDLE_PREFIX = "de.skycoder42."
 }
+
+qpmx_ts_target.path = $$[QT_INSTALL_TRANSLATIONS]
+qpmx_ts_target.depends += lrelease
+INSTALLS += qpmx_ts_target
+
+!ReleaseBuild:!DebugBuild:!system(qpmx -d $$shell_quote($$_PRO_FILE_PWD_) --qmake-run init $$QPMX_EXTRA_OPTIONS $$shell_quote($$QMAKE_QMAKE) $$shell_quote($$OUT_PWD)): error(qpmx initialization failed. Check the compilation log for details.)
+else: include($$OUT_PWD/qpmx_generated.pri)
+
+#replace template qm by ts
+qpmx_ts_target.files -= $$OUT_PWD/$$QPMX_WORKINGDIR/qtdatasync_template.qm
+qpmx_ts_target.files += translations/qtdatasync_template.ts

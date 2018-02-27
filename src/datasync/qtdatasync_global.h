@@ -2,8 +2,7 @@
 #define QTDATASYNC_GLOBAL_H
 
 #include <QtCore/qglobal.h>
-#include <QtCore/qpair.h>
-#include <QtCore/qobject.h>
+#include <QtCore/qstring.h>
 
 #if defined(QT_BUILD_DATASYNC_LIB)
 #	define Q_DATASYNC_EXPORT Q_DECL_EXPORT
@@ -11,14 +10,10 @@
 #	define Q_DATASYNC_EXPORT Q_DECL_IMPORT
 #endif
 
-//! The datasync main namespace
+//! The primary namespace of the QtDataSync library
 namespace QtDataSync {
-
-//! A typedef for an objects key, consisting of type name and key
-typedef QPair<QByteArray, QString> ObjectKey;
-
+//! The default setup name
+extern Q_DATASYNC_EXPORT const QString DefaultSetup;
 }
-
-Q_DECLARE_METATYPE(QtDataSync::ObjectKey)
 
 #endif // QTDATASYNC_GLOBAL_H

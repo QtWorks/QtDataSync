@@ -1,44 +1,54 @@
 #ifndef QTDATASYNC_SETUP_P_H
 #define QTDATASYNC_SETUP_P_H
 
-#include "qtdatasync_global.h"
-#include "datamerger.h"
-#include "localstore.h"
-#include "remoteconnector.h"
-#include "setup.h"
-#include "stateholder.h"
-#include "encryptor.h"
-#include "storageengine_p.h"
-
 #include <QtCore/QMutex>
 #include <QtCore/QThread>
 
 #include <QtJsonSerializer/QJsonSerializer>
 
+#include "qtdatasync_global.h"
+#include "setup.h"
+#include "defaults.h"
+#include "exchangeengine_p.h"
+#include "conflictresolver.h"
+
 namespace QtDataSync {
 
+//must be exported for tests
 class Q_DATASYNC_EXPORT SetupPrivate
 {
 	friend class Setup;
 
 public:
-	static StorageEngine *engine(const QString &name = Setup::DefaultSetup);
-
 	static void cleanupHandler();
+	static unsigned long currentTimeout();
+
+	static ExchangeEngine *engine(const QString &setupName);
+
+	QDir createStorageDir(const QString &setupName);
+	void createDefaults(const QString &setupName, const QDir &storageDir, bool passive);
 
 private:
+	struct SetupInfo {
+		QThread *thread;
+		ExchangeEngine *engine;
+
+		SetupInfo();
+		SetupInfo(QThread *thread, ExchangeEngine *engine);
+	};
+
+	static const QString DefaultLocalDir;
+
 	static QMutex setupMutex;
-	static QHash<QString, QPair<QThread*, StorageEngine*>> engines;
+	static QHash<QString, SetupInfo> engines;
 	static unsigned long timeout;
 
 	QString localDir;
+	QUrl roAddress;
 	QScopedPointer<QJsonSerializer> serializer;
-	QScopedPointer<LocalStore> localStore;
-	QScopedPointer<StateHolder> stateHolder;
-	QScopedPointer<RemoteConnector> remoteConnector;
-	QScopedPointer<DataMerger> dataMerger;
-	QScopedPointer<Encryptor> encryptor;
-	QHash<QByteArray, QVariant> properties;
+	QScopedPointer<ConflictResolver> resolver;
+	QHash<Defaults::PropertyKey, QVariant> properties;
+	Setup::FatalErrorHandler fatalErrorHandler;
 
 	SetupPrivate();
 };

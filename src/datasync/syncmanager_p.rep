@@ -1,0 +1,15 @@
+#include "qtdatasync_global.h"
+#include "syncmanager.h"
+
+class SyncManagerPrivate {
+	PROP(bool syncEnabled=true);
+	PROP(QtDataSync::SyncManager::SyncState syncState=QtDataSync::SyncManager::Initializing READONLY);
+	PROP(qreal syncProgress=-1.0 READONLY);
+	PROP(QString lastError READONLY);
+
+	SLOT(void synchronize());
+	SLOT(void reconnect());
+
+	SLOT(void runOnState(const QUuid &id, bool downloadOnly, bool triggerSync));
+	SIGNAL(stateReached(const QUuid &id, QtDataSync::SyncManager::SyncState syncState));
+};

@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<scxml xmlns="http://www.w3.org/2005/07/scxml" version="1.0" binding="early" xmlns:qt="http://www.qt.io/2015/02/scxml-ext" datamodel="ecmascript" name="ConnectorStateMachine" qt:editorversion="4.5.0">
+    <datamodel>
+        <data id="isClosing" expr="false"/>
+    </datamodel>
+    <state id="Active">
+        <qt:editorinfo geometry="361.11;121.38;-16.76;-54.93;915.52;486.71" scenegeometry="361.11;121.38;344.35;66.45;915.52;486.71"/>
+        <state id="Connecting">
+            <qt:editorinfo geometry="63.24;69.05;-60;-50;152;100" scenegeometry="424.35;190.43;364.35;140.43;152;100"/>
+            <transition type="external" event="connected" target="Connected">
+                <qt:editorinfo endTargetFactors="15.44;48.34"/>
+            </transition>
+            <transition type="external" event="noConnect" target="Disconnected">
+                <qt:editorinfo endTargetFactors="92.31;52.89" movePoint="-14.28;6.12"/>
+            </transition>
+        </state>
+        <transition type="external" event="reconnect" target="Reconnecting">
+            <qt:editorinfo endTargetFactors="82.96;68.97"/>
+            <send event="doDisconnect"/>
+        </transition>
+        <transition type="external" event="disconnected" target="Retry">
+            <qt:editorinfo endTargetFactors="76.99;24.14"/>
+        </transition>
+        <transition type="external" event="basicError" target="BasicError"/>
+        <transition type="external" event="fatalError" target="FatalError">
+            <qt:editorinfo endTargetFactors="80.03;62.93"/>
+        </transition>
+        <state id="Registering">
+            <qt:editorinfo geometry="522.25;64.27;-60;-50;120;100" scenegeometry="883.36;185.65;823.36;135.65;120;100"/>
+            <transition type="external" event="account" target="Idle">
+                <qt:editorinfo endTargetFactors="26.75;35.94"/>
+            </transition>
+        </state>
+        <state id="LoggingIn">
+            <qt:editorinfo geometry="522.25;194.72;-60;-50;120;100" scenegeometry="883.36;316.10;823.36;266.10;120;100"/>
+            <transition type="external" event="account" target="Idle"/>
+        </state>
+        <state id="Idle">
+            <qt:editorinfo geometry="818.11;163.22;-60;-50;120;100" scenegeometry="1179.22;284.60;1119.22;234.60;120;100"/>
+        </state>
+        <state id="Connected">
+            <qt:editorinfo geometry="292.76;68.36;-60;-50;120;100" scenegeometry="653.87;189.74;593.87;139.74;120;100"/>
+            <transition type="external" event="awaitRegister" target="Registering"/>
+            <transition type="external" event="awaitLogin" target="LoggingIn"/>
+            <transition type="external" event="awaitGranted" target="Granting"/>
+        </state>
+        <transition type="external" target="Closing" cond="isClosing">
+            <qt:editorinfo endTargetFactors="49.26;23.13"/>
+        </transition>
+        <state id="Granting">
+            <qt:editorinfo geometry="522.25;349.56;-60;-50;120;100" scenegeometry="883.36;470.94;823.36;420.94;120;100"/>
+            <transition type="external" event="account" target="Idle">
+                <qt:editorinfo endTargetFactors="36.58;78.25"/>
+            </transition>
+        </state>
+    </state>
+    <state id="Disconnected">
+        <qt:editorinfo geometry="83.65;236.23;-60;-50;166;100" scenegeometry="83.65;236.23;23.65;186.23;166;100"/>
+        <transition type="external" event="reconnect" target="Active">
+            <qt:editorinfo endTargetFactors="2.46;67.17"/>
+        </transition>
+        <transition type="external" target="Final_2" cond="isClosing"/>
+    </state>
+    <state id="Reconnecting">
+        <qt:editorinfo geometry="141.77;647.09;-60;-50;150;100" scenegeometry="141.77;647.09;81.77;597.09;150;100"/>
+        <transition type="external" event="disconnected" target="Active">
+            <qt:editorinfo endTargetFactors="5.38;88.86"/>
+        </transition>
+    </state>
+    <state id="Retry">
+        <qt:editorinfo geometry="674.27;708.29;-60;-50;120;100" scenegeometry="674.27;708.29;614.27;658.29;120;100"/>
+        <transition type="external" event="reconnect" target="Active">
+            <qt:editorinfo endTargetFactors="32.33;92.24"/>
+        </transition>
+        <transition type="external" target="Final" cond="isClosing">
+            <qt:editorinfo movePoint="0;-1.02"/>
+        </transition>
+    </state>
+    <state id="BasicError">
+        <qt:editorinfo geometry="360.05;791.93;-60;-50;120;100" scenegeometry="360.05;791.93;300.05;741.93;120;100"/>
+        <transition type="external" event="disconnected" target="Retry">
+            <qt:editorinfo endTargetFactors="71.74;47.36"/>
+        </transition>
+        <onentry>
+            <send event="doDisconnect"/>
+        </onentry>
+        <transition type="external" event="reconnect" target="Reconnecting">
+            <qt:editorinfo endTargetFactors="39.13;79.59"/>
+        </transition>
+    </state>
+    <state id="FatalError">
+        <qt:editorinfo geometry="106.65;438.54;-60;-50;120;100" scenegeometry="106.65;438.54;46.65;388.54;120;100"/>
+        <transition type="external" event="disconnected" target="Disconnected"/>
+        <onentry>
+            <send event="doDisconnect"/>
+        </onentry>
+        <transition type="external" event="reconnect" target="Reconnecting">
+            <qt:editorinfo endTargetFactors="29.92;40.90"/>
+        </transition>
+    </state>
+    <state id="Closing">
+        <qt:editorinfo geometry="947.17;708.29;-60;-50;120;100" scenegeometry="947.17;708.29;887.17;658.29;120;100"/>
+        <onentry>
+            <send event="doDisconnect"/>
+        </onentry>
+        <transition type="external" event="disconnected" target="Final"/>
+    </state>
+    <final id="Final">
+        <qt:editorinfo geometry="802.11;843.95;-20;-20;40;40" scenegeometry="802.11;843.95;782.11;823.95;40;40"/>
+    </final>
+    <final id="Final_2">
+        <qt:editorinfo geometry="106.65;64.27;-20;-20;40;40" scenegeometry="106.65;64.27;86.65;44.27;40;40"/>
+    </final>
+</scxml>

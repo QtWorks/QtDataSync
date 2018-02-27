@@ -1,0 +1,91 @@
+Semantics:
+	*1: local
+	*2: remote
+
+Environment:
+	action{[exists,noexists,cachedDelete]<->[changed,deleted]}
+	policy{[changed,deleted]}
+	persistent{<bool>}
+
+Parameters:
+	version{v*}
+	chksum{c*} (on demand)
+	data{d*} (on demand)
+
+action(exists<->deleted):
+	switch(v1, v2):
+		case v1 < v2:
+			choose v2
+			if not persistent:
+				changed	#changed again, because the other side does not know delete was choosen
+			done
+		case v1 > v2:
+			choose v1
+			done
+		case v1 == v2:
+			policy(changed):
+				choose v1 + 1
+			policy(deleted):
+				choose v2 + 1
+			changed
+			done
+
+action(exists<->changed):
+	switch(v1,c1; v2,c2):
+		case v1 < v2:
+			choose v2
+			done
+		case v1 > v2:
+			choose v1
+			done
+		case v1 == v2; c1 == c2:
+			unchanged
+			done
+		case v1 == v2; c1 != c2:
+			if <chooser(d1, d2, &result)>:
+				choose result
+			else if c1 < c2:
+				choose v2 + 1
+			else if c1 > c2:
+				choose v1 + 1
+			changed
+			done
+
+action(cachedDelete<->deleted):
+	if v1 <= v2:
+		if persistent:
+			choose v2
+		else
+			unchanged
+	done
+
+action(cachedDelete<->changed): #special, happens only when deleted, but change not yet pushed, or when persistent is true
+	switch(v1, v2):
+		case v1 < v2:
+			choose v2
+			done
+		case v1 > v2:
+			choose v1
+			done
+		default:
+			policy(changed):
+				choose v2 + 1
+				changed
+				done
+			policy(deleted):
+				choose v1 + 1
+				changed
+				done
+
+action(noexists<->deleted):
+	if persistent:
+		choose v2
+	done
+
+action(noexists<->changed):
+	choose v2
+	done
+	# !!! no information is given whether locally was just deleted or never existed or was deleted long ago.
+	# But this is addressed by the other side, if delete is prefered, they will resend a higher versioned delete change (Lines 19/20)
+
+

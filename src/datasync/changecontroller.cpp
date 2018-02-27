@@ -1,453 +1,272 @@
 #include "changecontroller_p.h"
-
-#include <QtCore/QMetaEnum>
+#include "datastore.h"
+#include "setup_p.h"
+#include "exchangeengine_p.h"
+#include "synchelper_p.h"
+#include "changeemitter_p.h"
 
 using namespace QtDataSync;
 
-#define UNITE_STATE(x, y) (x | (y << 16))
-#define LOG defaults->loggingCategory()
+#define QTDATASYNC_LOG QTDATASYNC_LOG_CONTROLLER
 
-ChangeController::ChangeController(DataMerger *merger, QObject *parent) :
-	QObject(parent),
-	defaults(nullptr),
-	merger(merger),
-	localReady(false),
-	remoteReady(false),
-	localState(),
-	remoteState(),
-	failedKeys(),
-	currentMode(DoNothing),
-	currentKey(),
-	currentState(DoneState)
+ChangeController::ChangeController(const Defaults &defaults, QObject *parent) :
+	Controller("change", defaults, parent),
+	_store(nullptr),
+	_emitter(nullptr),
+	_uploadingEnabled(false),
+	_uploadLimit(10), //good default
+	_activeUploads(),
+	_changeEstimate(0)
+{}
+
+void ChangeController::initialize(const QVariantHash &params)
 {
-	merger->setParent(this);
+	_store = params.value(QStringLiteral("store")).value<LocalStore*>();
+	Q_ASSERT_X(_store, Q_FUNC_INFO, "Missing parameter: store (LocalStore)");
+	_emitter = params.value(QStringLiteral("emitter")).value<ChangeEmitter*>();
+	Q_ASSERT_X(_emitter, Q_FUNC_INFO, "Missing parameter: emitter (ChangeEmitter)");
+
+	connect(_emitter, &ChangeEmitter::uploadNeeded,
+			this, &ChangeController::changeTriggered);
 }
 
-void ChangeController::initialize(Defaults *defaults)
+void ChangeController::setUploadingEnabled(bool uploading)
 {
-	this->defaults = defaults;
-	merger->initialize(defaults);
-}
-
-void ChangeController::finalize()
-{
-	merger->finalize();
-}
-
-void ChangeController::setInitialLocalStatus(const StateHolder::ChangeHash &changes, bool triggerSync)
-{
-	localState.clear();
-	for(auto it = changes.constBegin(); it != changes.constEnd(); it++)
-		localState.insert(it.key(), it.value());
-	localReady = true;
-	if(triggerSync)
-		newChanges();
-}
-
-void ChangeController::updateLocalStatus(const ObjectKey &key, StateHolder::ChangeState &state)
-{
-	if(state == StateHolder::Unchanged) {
-		if(key != currentKey) {//ignore currentKey -> unchanged as a result of a change operation
-			//unchange does not trigger sync, but may change the progress
-			localState.remove(key);
-			updateProgress();
-		}
-	} else {
-		if(key == currentKey)
-			currentState = CancelState;//cancel whatever is currently done for that key
-		localState.insert(key, state);
-		newChanges();
+	_uploadingEnabled = uploading;
+	logDebug() << "Change uploading enabled to" << uploading;
+	if(uploading)
+		uploadNext(true);
+	else {
+		endOp(); //stop timeouts
+		emit uploadingChanged(false);
 	}
 }
 
-void ChangeController::setRemoteStatus(RemoteConnector::RemoteState state, const StateHolder::ChangeHash &changes)
+void ChangeController::clearUploads()
 {
-	for(auto it = changes.constBegin(); it != changes.constEnd(); it++){
-		if(it.key() == currentKey)
-			currentState = CancelState;//cancel whatever is currently done for that key
-		remoteState.insert(it.key(), it.value());
-	}
-
-	switch (state) {
-	case RemoteConnector::RemoteDisconnected:
-		emit updateSyncState(SyncController::Disconnected);
-		remoteReady = false;
-		break;
-	case RemoteConnector::RemoteLoadingState:
-		emit updateSyncState(SyncController::Loading);
-		remoteReady = false;
-		break;
-	case RemoteConnector::RemoteReady:
-		remoteReady = true;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
-	newChanges();
+	setUploadingEnabled(false);
+	if(!_activeUploads.isEmpty())
+		logDebug() << "Finished uploading changes";
+	_activeUploads.clear();
+	_changeEstimate = 0;
 }
 
-void ChangeController::updateRemoteStatus(const ObjectKey &key, StateHolder::ChangeState state)
+void ChangeController::updateUploadLimit(quint32 limit)
 {
-	if(key == currentKey)
-		currentState = CancelState;//cancel whatever is currently done for that key
-	remoteState.insert(key, state);
-	newChanges();
+	logDebug() << "Updated update limit to:" << limit;
+	_uploadLimit = static_cast<int>(limit);
 }
 
-void ChangeController::nextStage(bool success, const QJsonValue &result)
+void ChangeController::uploadDone(const QByteArray &key)
 {
-	if(!success) {
-		failedKeys.insert(currentKey);
-		currentState = DoneState;
-	}
-
-	//in case of done --> go to the next one!
-	if(currentState == DoneState) {
-		qCDebug(LOG) << "Synced"
-					 << currentKey.first
-					 << "with id"
-					 << currentKey.second;
-		localState.remove(currentKey);
-		remoteState.remove(currentKey);
-	}
-	if(currentState == DoneState ||
-	   currentState == CancelState)
-		generateNextAction();
-
-	emit updateSyncState(SyncController::Syncing);
-	updateProgress();
-
-	switch (currentMode) {
-	case DoNothing://nothing to do -> finished
-		emit updateSyncState(failedKeys.size() > 0 ? SyncController::SyncedWithErrors : SyncController::Synced);
+	if(!_activeUploads.contains(key)) {
+		logWarning() << "Unknown key completed:" << key.toHex();
 		return;
-	case DownloadRemote:
-		actionDownloadRemote(result);
-		break;
-	case DeleteLocal:
-		actionDeleteLocal();
-		break;
-	case UploadLocal:
-		actionUploadLocal(result);
-		break;
-	case Merge:
-		actionMerge(result);
-		break;
-	case DeleteRemote:
-		actionDeleteRemote();
-		break;
-	case MarkAsUnchanged:
-		actionMarkAsUnchanged();
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
+	}
+
+	try {
+		auto info = _activeUploads.take(key);
+		_store->markUnchanged(info.key, info.version, info.isDelete);
+		_changeEstimate--;
+		emit progressIncrement();
+		logDebug() << "Completed upload. Marked"
+				   << info.key << "as unchanged ( Active uploads:"
+				   << _activeUploads.size() << ")";
+
+		if(_uploadingEnabled && _activeUploads.size() < _uploadLimit) //queued, so we may have the luck to complete a few more before uploading again
+			QMetaObject::invokeMethod(this, "uploadNext", Qt::QueuedConnection,
+									  Q_ARG(bool, false));
+	} catch(Exception &e) {
+		logCritical() << "Failed to complete upload with error:" << e.what();
+		emit controllerError(tr("Failed to upload changes to server."));
 	}
 }
 
-void ChangeController::newChanges()
+void ChangeController::deviceUploadDone(const QByteArray &key, const QUuid &deviceId)
 {
-	if(remoteReady && !localReady) {//load local on demand
-		emit loadLocalStatus();
-	} else if(remoteReady && localReady) {
-		currentState = CancelState;//whatever is currently done is aborted -> prepare for next stage
-		if(currentMode == DoNothing) {//only if not already syncing!
-			emit updateSyncState(SyncController::Syncing);
-			nextStage(true);
+	if(!_activeUploads.contains({key, deviceId})) {
+		logWarning() << "Unknown device key completed:" << key.toHex() << deviceId;
+		return;
+	}
+
+	try {
+		auto info = _activeUploads.take({key, deviceId});
+		_store->removeDeviceChange(info.key, deviceId);
+		_changeEstimate--;
+		emit progressIncrement();
+		logDebug() << "Completed device upload. Marked"
+				   << info.key << "for device" << deviceId << "as unchanged ( Active uploads:"
+				   << _activeUploads.size() << ")";
+
+		if(_uploadingEnabled && _activeUploads.size() < _uploadLimit) //queued, so we may have the luck to complete a few more before uploading again
+			QMetaObject::invokeMethod(this, "uploadNext", Qt::QueuedConnection,
+									  Q_ARG(bool, false));
+	} catch(Exception &e) {
+		logCritical() << "Failed to complete upload with error:" << e.what();
+		emit controllerError(tr("Failed to upload changes to server."));
+	}
+}
+
+void ChangeController::changeTriggered()
+{
+	if(_uploadingEnabled)
+		uploadNext(_activeUploads.isEmpty());
+}
+
+void ChangeController::uploadNext(bool emitStarted)
+{
+	//uploads already exists: emit started no matter whether any are actually started from this call
+	if(emitStarted && !_activeUploads.isEmpty()) {
+		emitStarted = false;
+		logDebug() << "Beginning uploading changes";
+		emit uploadingChanged(true);
+	}
+
+	if(_activeUploads.size() >= _uploadLimit)
+		return;
+
+	try {
+		//update change estimate, if neccessary
+		auto emitProgress = false;
+		if(_changeEstimate == 0) {
+			_changeEstimate = _store->changeCount();
+			if(_changeEstimate > 0) {
+				if(emitStarted)
+					emitProgress = true;
+				else
+					emit progressAdded(_changeEstimate);
+			}
 		}
-	}
-	updateProgress();
-}
 
-void ChangeController::updateProgress()
-{
-	auto keySet = QSet<ObjectKey>::fromList(localState.keys());
-	keySet.unite(QSet<ObjectKey>::fromList(remoteState.keys()));
-	emit updateSyncProgress(keySet.size());
-}
+		_store->loadChanges(_uploadLimit, [this, emitProgress, &emitStarted](ObjectKey objKey, quint64 version, QString file, QUuid deviceId) {
+			CachedObjectKey key(objKey, deviceId);
 
-void ChangeController::generateNextAction()
-{
-	currentMode = DoNothing;
-
-	do {
-		currentKey = {};
-		if(!remoteState.isEmpty())
-			currentKey = remoteState.keys().first();
-		else if(!localState.isEmpty())
-			currentKey = localState.keys().first();
-		else
-			break;
-
-		auto local = localState.value(currentKey, StateHolder::Unchanged);
-		auto remote = remoteState.value(currentKey, StateHolder::Unchanged);
-		failedKeys.remove(currentKey);
-
-		switch (UNITE_STATE(local, remote)) {
-		case UNITE_STATE(StateHolder::Unchanged, StateHolder::Unchanged)://u:u -> do nothing
-			break;
-		case UNITE_STATE(StateHolder::Unchanged, StateHolder::Changed)://u:c -> download
-			currentMode = DownloadRemote;
-			break;
-		case UNITE_STATE(StateHolder::Unchanged, StateHolder::Deleted)://u:d -> delete local
-			currentMode = DeleteLocal;
-			break;
-		case UNITE_STATE(StateHolder::Changed, StateHolder::Unchanged)://c:u -> upload
-			currentMode = UploadLocal;
-			break;
-		case UNITE_STATE(StateHolder::Changed, StateHolder::Changed)://c:c -> MERGE
-			switch (merger->mergePolicy()) {
-			case DataMerger::KeepLocal://[c]:c -> upload
-				currentMode = UploadLocal;
-				break;
-			case DataMerger::KeepRemote://c:[c] -> download
-				currentMode = DownloadRemote;
-				break;
-			case DataMerger::Merge://[c]:[c] -> merge
-				currentMode = Merge;
-				break;
-			default:
-				Q_UNREACHABLE();
-				break;
+			//skip stuff already beeing uploaded (could still have changed, but to prevent errors)
+			auto skip = false;
+			for(auto mKey : _activeUploads.keys()) {
+				if(key == mKey) {
+					skip = true;
+					break;
+				}
 			}
-			break;
-		case UNITE_STATE(StateHolder::Changed, StateHolder::Deleted)://c:d -> POLICY
-			switch (merger->syncPolicy()) {
-			case QtDataSync::DataMerger::PreferLocal://[c]:d -> upload
-			case QtDataSync::DataMerger::PreferUpdated:
-				currentMode = UploadLocal;
-				break;
-			case QtDataSync::DataMerger::PreferRemote://c:[d] -> delete local
-			case QtDataSync::DataMerger::PreferDeleted:
-				currentMode = DeleteLocal;
-				break;
-			default:
-				Q_UNREACHABLE();
-				break;
+			if(skip)
+				return true;
+
+			//signale that uploading has started
+			if(emitStarted) {
+				emitStarted = false;
+				logDebug() << "Beginning uploading changes";
+				emit uploadingChanged(true);
+				if(emitProgress)
+					emit progressAdded(_changeEstimate);
 			}
-			break;
-		case UNITE_STATE(StateHolder::Deleted, StateHolder::Unchanged)://d:u -> delete remote
-			currentMode = DeleteRemote;
-			break;
-		case UNITE_STATE(StateHolder::Deleted, StateHolder::Changed)://d:c -> POLICY
-			switch (merger->syncPolicy()) {
-			case QtDataSync::DataMerger::PreferLocal://[d]:c -> delete remote
-			case QtDataSync::DataMerger::PreferDeleted:
-				currentMode = DeleteRemote;
-				break;
-			case QtDataSync::DataMerger::PreferRemote://d:[c] -> download
-			case QtDataSync::DataMerger::PreferUpdated:
-				currentMode = DownloadRemote;
-				break;
-			default:
-				Q_UNREACHABLE();
-				break;
+
+			auto keyHash = key.hashed();
+			auto isDelete = file.isNull();
+			_activeUploads.insert(key, {key, version, isDelete});
+			beginOp(); //start the default timeout
+			if(isDelete) {//deleted
+				if(deviceId.isNull()) {
+					emit uploadChange(keyHash, SyncHelper::combine(key, version));
+					logDebug() << "Started upload of deleted" << key
+							   << "( Active uploads:" << _activeUploads.size() << ")";
+				} else {
+					emit uploadDeviceChange(keyHash, deviceId, SyncHelper::combine(key, version));
+					logDebug() << "Started device upload of deleted"
+							   << key << "for device" << deviceId
+							   << "( Active uploads:" << _activeUploads.size() << ")";
+				}
+			} else { //changed
+				try {
+					auto json = _store->readJson(key, file);
+					if(deviceId.isNull()) {
+						emit uploadChange(keyHash, SyncHelper::combine(key, version, json));
+						logDebug() << "Started upload of changed" << key
+								   << "( Active uploads:" << _activeUploads.size() << ")";
+					} else {
+						emit uploadDeviceChange(keyHash, deviceId, SyncHelper::combine(key, version, json));
+						logDebug() << "Started device upload of changed"
+								   << key << "for device" << deviceId
+								   << "( Active uploads:" << _activeUploads.size() << ")";
+					}
+				} catch (Exception &e) {
+					logWarning() << "Failed to read json for upload. Assuming unchanged. Error:" << e.what();
+					QMetaObject::invokeMethod(this, "uploadDone", Qt::QueuedConnection,
+											  Q_ARG(QByteArray, keyHash));
+				}
 			}
-			break;
-		case UNITE_STATE(StateHolder::Deleted, StateHolder::Deleted)://d:d -> mark unchanged
-			currentMode = MarkAsUnchanged;
-			break;
-		default:
-			Q_UNREACHABLE();
-			break;
+
+			return _activeUploads.size() < _uploadLimit; //only continue as long as there is free space
+		});
+
+		if(_activeUploads.isEmpty()) {
+			endOp(); //stop any timeouts
+			logDebug() << "Finished uploading changes";
+			emit uploadingChanged(false);
 		}
-	} while(currentMode == DoNothing);
-
-	switch (currentMode) {
-	case DoNothing:
-		currentState = DoneState;
-		break;
-	case DownloadRemote:
-		currentState = DownloadState;//download -> save[unchanged] -> remote unchanged
-		break;
-	case DeleteLocal:
-		currentState = RemoveLocalState;//remove local[unchanged] -> remote unchanged
-		break;
-	case UploadLocal:
-		currentState = LoadState;//load -> upload[unchanged] -> local unchanged
-		break;
-	case Merge:
-		currentState = DownloadState;//download -> load -> [merge]save[unchanged] -> upload[unchanged]
-		break;
-	case DeleteRemote:
-		currentState = RemoveRemoteState;//remove remote[unchanged] -> local unchanged
-		break;
-	case MarkAsUnchanged:
-		currentState = LocalMarkState;//local unchanged -> remote unchanged
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
-
-	if(currentMode != DoNothing) {
-		qCDebug(LOG) << "Beginning operation of type"
-					 << QMetaEnum::fromType<ActionMode>().valueToKey(currentMode)
-					 << "for"
-					 << currentKey.first
-					 << "with id"
-					 << currentKey.second;
+	} catch(Exception &e) {
+		logCritical() << "Error when trying to upload change:" << e.what();
+		emit controllerError(tr("Failed to upload changes to server."));
 	}
 }
 
-void ChangeController::actionDownloadRemote(const QJsonValue &result)
-{
-	ChangeOperation operation;
-	operation.key = currentKey;
 
-	switch (currentState) {
-	case DownloadState:
-		operation.operation = Load;
-		emit beginRemoteOperation(operation);
-		currentState = SaveState;
-		break;
-	case SaveState:
-		operation.operation = Save;
-		operation.writeObject = result.toObject();
-		emit beginLocalOperation(operation);
-		currentState = RemoteMarkState;
-		break;
-	case RemoteMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginRemoteOperation(operation);
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
+
+ChangeController::ChangeInfo::ChangeInfo() :
+	key(),
+	version(0),
+	checksum()
+{}
+
+ChangeController::ChangeInfo::ChangeInfo(const ObjectKey &key, quint64 version, const QByteArray &checksum) :
+	key(key),
+	version(version),
+	checksum(checksum)
+{}
+
+
+
+ChangeController::CachedObjectKey::CachedObjectKey() :
+	ObjectKey(),
+	_hash()
+{}
+
+ChangeController::CachedObjectKey::CachedObjectKey(const ObjectKey &other, const QUuid &deviceId) :
+	ObjectKey(other),
+	optionalDevice(deviceId),
+	_hash()
+{}
+
+ChangeController::CachedObjectKey::CachedObjectKey(const QByteArray &hash, const QUuid &deviceId) :
+	ObjectKey(),
+	optionalDevice(deviceId),
+	_hash(hash)
+{}
+
+QByteArray ChangeController::CachedObjectKey::hashed() const
+{
+	if(_hash.isEmpty())
+		_hash = ObjectKey::hashed();
+	return _hash;
 }
 
-void ChangeController::actionDeleteLocal()
+bool ChangeController::CachedObjectKey::operator==(const CachedObjectKey &other) const
 {
-	ChangeOperation operation;
-	operation.key = currentKey;
-
-	switch (currentState) {
-	case RemoveLocalState:
-		operation.operation = Remove;
-		emit beginLocalOperation(operation);
-		currentState = RemoteMarkState;
-		break;
-	case RemoteMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginRemoteOperation(operation);
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
+	if(!_hash.isEmpty() && !other._hash.isEmpty())
+		return _hash == other._hash && optionalDevice == other.optionalDevice;
+	else
+		return (static_cast<ObjectKey>(*this) == static_cast<ObjectKey>(other)) && optionalDevice == other.optionalDevice;
 }
 
-void ChangeController::actionUploadLocal(const QJsonValue &result)
+bool ChangeController::CachedObjectKey::operator!=(const CachedObjectKey &other) const
 {
-	ChangeOperation operation;
-	operation.key = currentKey;
-
-	switch (currentState) {
-	case LoadState:
-		operation.operation = Load;
-		emit beginLocalOperation(operation);
-		currentState = UploadState;
-		break;
-	case UploadState:
-		operation.operation = Save;
-		operation.writeObject = result.toObject();
-		emit beginRemoteOperation(operation);
-		currentState = LocalMarkState;
-		break;
-	case LocalMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginLocalOperation(operation);
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
+	if(!_hash.isEmpty() && !other._hash.isEmpty())
+		return _hash != other._hash || optionalDevice != other.optionalDevice;
+	else
+		return (static_cast<ObjectKey>(*this) != static_cast<ObjectKey>(other)) || optionalDevice != other.optionalDevice;
 }
 
-void ChangeController::actionMerge(const QJsonValue &result)
+uint QtDataSync::qHash(const ChangeController::CachedObjectKey &key, uint seed)
 {
-	ChangeOperation operation;
-	operation.key = currentKey;
-
-	switch (currentState) {
-	case DownloadState:
-		operation.operation = Load;
-		emit beginRemoteOperation(operation);
-		currentState = LoadState;
-		break;
-	case LoadState:
-		currentObject = result.toObject();//temp save the download result
-
-		operation.operation = Load;
-		emit beginLocalOperation(operation);
-		currentState = SaveState;
-		break;
-	case SaveState:
-		currentObject = merger->merge(result.toObject(), currentObject);//merge into temp var
-
-		operation.operation = Save;
-		operation.writeObject = currentObject;
-		emit beginLocalOperation(operation);
-		currentState = UploadState;
-		break;
-	case UploadState:
-		operation.operation = Save;
-		operation.writeObject = currentObject;
-		emit beginRemoteOperation(operation);
-		currentObject = {};
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
-}
-
-void ChangeController::actionDeleteRemote()
-{
-	ChangeOperation operation;
-	operation.key = currentKey;
-
-	switch (currentState) {
-	case RemoveRemoteState:
-		operation.operation = Remove;
-		emit beginRemoteOperation(operation);
-		currentState = LocalMarkState;
-		break;
-	case LocalMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginLocalOperation(operation);
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
-}
-
-void ChangeController::actionMarkAsUnchanged()
-{
-	ChangeOperation operation;
-	operation.key = currentKey;
-
-	switch (currentState) {
-	case LocalMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginLocalOperation(operation);
-		currentState = RemoteMarkState;
-		break;
-	case RemoteMarkState:
-		operation.operation = MarkUnchanged;
-		emit beginRemoteOperation(operation);
-		currentState = DoneState;
-		break;
-	default:
-		Q_UNREACHABLE();
-		break;
-	}
+	return qHash(key.hashed(), seed) ^ qHash(key.optionalDevice, seed);
 }
